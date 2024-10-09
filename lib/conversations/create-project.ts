@@ -1,13 +1,19 @@
-import { Bot } from "grammy";
-import { MyContext } from "../../bot";
-import { ActSupabaseClient } from "../clients/supabase";
-import { Conversation } from "@grammyjs/conversations";
-import { getUser } from "../users/get-user";
-import { createSlug, urlToBlob } from "../utils";
-import * as mime from "mime-types";
-import { activeProjectRecord, isInConversationRecord, projectRecord } from "../records";
-import { botSettings } from "../../config";
-import { sendTipMessage } from "./send-message";
+import { Bot } from 'grammy';
+import * as mime from 'mime-types';
+
+import { Conversation } from '@grammyjs/conversations';
+
+import { MyContext } from '../../bot';
+import { botSettings } from '../../config';
+import { ActSupabaseClient } from '../clients/supabase';
+import {
+  activeProjectRecord,
+  isInConversationRecord,
+  projectRecord,
+} from '../records';
+import { getUser } from '../users/get-user';
+import { createSlug } from '../utils';
+import { sendTipMessage } from './send-message';
 
 type MyConversation = Conversation<MyContext>;
 
@@ -19,6 +25,18 @@ const errorMessages = {
 const steps = 3;
 const botToken = process.env.BOT_TOKEN!;
 
+// Helper function to extract username from URL
+function extractUsernameFromUrl(url: string, platform: "twitter" | "github"): string | null {
+    let regex;
+    if (platform === "twitter") {
+        regex = /(?:https?:\/\/)?(?:www\.)?twitter\.com\/([a-zA-Z0-9_]+)/i;
+    } else if (platform === "github") {
+        regex = /(?:https?:\/\/)?(?:www\.)?github\.com\/([a-zA-Z0-9_-]+)/i;
+    }
+    const match = url.match(regex);
+    return match ? match[1] : null;
+}
+
 export async function createProject(conversation: MyConversation, ctx: MyContext, supabase: ActSupabaseClient, bot: Bot<MyContext>) {
 	const userId = ctx.from?.id!;
 	const user = await getUser(userId, supabase, bot);
@@ -26,6 +44,7 @@ export async function createProject(conversation: MyConversation, ctx: MyContext
 
 	await sendTipMessage(ctx);
 
+	// 1. Get the project name
 	await ctx.reply(`<code>[1/${steps}]</code>\nSure! Let's create a new project. What's the name of the project or person you're creating a gmon.link for?`, {
 		parse_mode: "HTML",
 	});
@@ -33,6 +52,7 @@ export async function createProject(conversation: MyConversation, ctx: MyContext
 		await ctx.reply(errorMessages.invalidProjectName);
 	});
 
+	// 2. Get the project description
 	await ctx.reply(`<code>[2/${steps}]</code>\nGreat! <code>${projectName}</code> it is. Now, let's write a short description for the project.`, {
 		parse_mode: "HTML",
 	});
@@ -40,7 +60,44 @@ export async function createProject(conversation: MyConversation, ctx: MyContext
 		await ctx.reply("Please provide a valid description.");
 	});
 
-	await ctx.reply(`<code>[3/${steps}]</code>\nFab! Let's add an image for the project. Send a photo or an image of the project.`, { parse_mode: "HTML" });
+	// 3. Twitter ID or URL
+    await ctx.reply(`<code>[3/${steps}]</code>\nDo you have a Twitter handle or a Twitter URL? Please provide it. Type "no" if you don't want to add it.`, { parse_mode: "HTML" });
+    const twitterInput = await conversation.form.text(async (ctx) => {
+        await ctx.reply("Please provide a valid input (Twitter handle/URL or 'no').");
+    });
+
+    let twitterId = twitterInput;
+	if (twitterInput.startsWith("http")) {
+		twitterId = extractUsernameFromUrl(twitterInput, "twitter");
+
+		// **Validation**: If extraction fails, prompt the user and stop execution
+		if (!twitterId) {
+			await ctx.reply("⚠️ The provided Twitter URL is invalid. Please try again or type 'no'.");
+			return;  // Stops further execution if invalid input
+		}
+	}
+    const twitterLink = twitterId !== "no" ? `https://twitter.com/${twitterId}` : null;
+
+    // 4. GitHub ID or URL
+    await ctx.reply(`<code>[4/${steps}]</code>\nDo you have a GitHub ID or GitHub URL? Please provide it. Type "no" to skip.`, { parse_mode: "HTML" });
+    const githubInput = await conversation.form.text(async (ctx) => {
+        await ctx.reply("Please provide a valid input (GitHub handle/URL or 'no').");
+    });
+
+    let githubId = githubInput;
+    if (githubInput.startsWith("http")) {
+		githubId = extractUsernameFromUrl(githubInput, "github");
+	
+		// **Validation**: If extraction fails, prompt the user and stop execution
+		if (!githubId) {
+			await ctx.reply("⚠️ The provided GitHub URL is invalid. Please try again or type 'no'.");
+			return;  // Stops further execution if invalid input
+		}
+	}
+    const githubLink = githubId !== "no" ? `https://github.com/${githubId}` : null;
+
+	// 5. Add an image
+	await ctx.reply(`<code>[5/${steps}]</code>\nFab! Let's add an image for the project. Send a photo or an image of the project.`, { parse_mode: "HTML" });
 	const { message } = await conversation.waitFor(["message:photo"]);
 
 	if (!message || !message.photo) {
@@ -92,7 +149,12 @@ export async function createProject(conversation: MyConversation, ctx: MyContext
 	await ctx.api.editMessageText(ctx.chat!.id, uploadingMessage.message_id, "⏳ We're creating your project...");
 	const { data, error: insertError } = await supabase
 		.from("projects")
-		.insert({ user_id: userId, title: projectName, description: projectDescription, slug, avatar_url: imageUrl })
+		.insert({ user_id: userId, title: projectName, description: projectDescription, slug, avatar_url: imageUrl, 
+			links: [
+                ...(twitterLink ? [{ title: "Twitter", url: twitterLink }] : []),
+                ...(githubLink ? [{ title: "GitHub", url: githubLink }] : []),
+            ],
+		 })
 		.select("*")
 		.single();
 	if (insertError || !data) {
